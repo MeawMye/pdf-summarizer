@@ -1,0 +1,83 @@
+코드를 정확히 정리하고, PDF 업로드 API 테스트 방법을 명확히 설명하겠습니다.
+
+[](file:///c%3A/Users/user/Desktop/vibe/server.js) 읽기
+
+## 핵심 코드 요약
+
+### 서버 구조
+- `Express`로 웹 서버를 구성
+- `Multer`로 파일 업로드 처리
+- `pdf-parse`로 업로드된 PDF에서 텍스트 추출
+- 추출된 텍스트를 간단히 요약해서 JSON으로 반환
+
+### 주요 흐름
+1. `app.post('/upload', upload.single('pdf'), async (req, res) => { ... })`
+   - `/upload` 엔드포인트로 POST 요청을 받음
+   - 업로드할 파일 필드는 `pdf`로 지정
+
+2. 업로드된 파일이 없으면 400 에러 반환
+   - `if (!req.file) return res.status(400).json({ error: 'No PDF file uploaded' });`
+
+3. 업로드된 PDF를 읽어서 `pdf-parse`로 텍스트 추출
+   - `const dataBuffer = fs.readFileSync(req.file.path);`
+   - `const data = await pdfParse(dataBuffer);`
+   - `const text = data.text;`
+
+4. 텍스트 요약
+   - `summarizeText(text)`에서 텍스트를 공백 기준으로 나누고 앞 500단어만 취함
+   - 길면 끝에 `...`을 추가
+
+5. 업로드된 임시 파일 삭제
+   - `fs.unlinkSync(req.file.path);`
+
+6. 요약 결과 반환
+   - `res.json({ summary });`
+
+---
+
+## API 테스트 방법
+
+### 1. 서버가 실행 중인지 확인
+- 터미널에서 `npm start` 실행
+- 출력에 `Server running on http://localhost:3000` 나오면 정상
+
+### 2. PDF 파일 업로드 요청 보내기
+다음 두 가지 방법 중 하나를 사용하세요.
+
+#### 방법 A: curl 사용
+터미널에서 아래 명령 실행:
+
+```powershell
+curl -X POST -F "pdf=@C:\경로\파일명.pdf" http://localhost:3000/upload
+```
+
+- `C:\경로\파일명.pdf`를 실제 PDF 파일 경로로 바꾸세요.
+- 요청이 성공하면 JSON 형태로 요약 결과가 나옵니다.
+
+#### 방법 B: Postman 사용
+1. Postman 실행
+2. 새 요청 생성
+3. 메서드: `POST`
+4. URL: `http://localhost:3000/upload`
+5. Body 탭 선택
+6. `form-data` 선택
+7. 키 이름: `pdf`
+8. 타입: `File`
+9. 업로드할 PDF 파일 선택
+10. Send 클릭
+
+---
+
+## 예시 응답
+성공하면 다음처럼 나옵니다:
+
+```json
+{
+  "summary": "PDF에서 추출된 텍스트의 앞부분 500단어..."
+}
+```
+
+---
+
+## 한 문장 요약
+`/upload`에 PDF를 보내면 서버가 텍스트를 뽑아 간단히 요약한 결과를 반환합니다.
