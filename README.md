@@ -59,6 +59,8 @@ Local orchestration scripts are in:
 - `subprojects/local-llm/stop-all.ps1`
 - `subprojects/local-llm/set-local-llm-env.ps1`
 
+**SSD-Based Setup:** This project is designed to run entirely from an SSD (e.g., `D:\local-llm`) without C-drive dependencies. The SSD bundle includes models, runtime binaries, and data storage. For detailed setup instructions, see `README_INTERNAL.md`.
+
 Typical usage on Windows PowerShell:
 
 ```powershell

@@ -11,10 +11,12 @@
 
 ## 1) 왜 이 구조를 선택했는가
 
-### SSD를 기준으로 설계한 이유
+### SSD를 기준으로 설계한 이유 (완전 자체 포함)
 
 - 모델 파일(GGUF/임베딩 모델)은 크기가 크고 다운로드 시간이 길다.
-- 모델과 산출물(임베딩 JSON)을 SSD에 고정하면, PC를 바꿔도 SSD만 연결하면 작업을 재개할 수 있다.
+- llama.cpp 런타임(llama-server.exe)도 SSD에 포함되어 있다.
+- 모델, 런타임, 산출물(임베딩 JSON)을 모두 SSD에 고정하면, PC를 바꿔도 SSD만 연결하면 추가 설치 없이 즉시 작업을 재개할 수 있다.
+- **C 드라이브와의 의존성이 완전히 제거되었다.**
 - 경로를 환경변수로 분리했기 때문에 코드 수정 없이 재배치가 가능하다.
 
 ### 2단계 모델(추출기/순서화기)을 분리한 이유
@@ -63,6 +65,8 @@
 
 ```text
 D:\local-llm\
+  bin\
+    llama-server.exe         (llama.cpp 런타임)
   models\
     extractor\qwen2.5-3b-instruct\
     planner\qwen2.5-7b-instruct\
@@ -75,6 +79,7 @@ D:\local-llm\
 필수 확인 포인트:
 
 - planner GGUF는 분할 파일에서 단일 파일로 병합되어 있어야 한다.
+- llama-server.exe는 SSD 루트의 bin/ 디렉터리에 위치해야 한다.
 - 임베딩 산출물은 D:\local-llm\data\embeddings 아래 JSON으로 누적된다.
 
 ---
@@ -135,7 +140,7 @@ python -m pip install --upgrade pip fastapi uvicorn fastembed
 
 - EMBEDDING_MODEL이 bge-m3이거나 비어 있으면 start-all은 실행 가능성을 위해
   sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2로 자동 보정한다.
-- llama-server.exe 경로가 다르면 LLAMA_SERVER_EXE 환경변수로 지정한다.
+- llama-server.exe는 D:\local-llm\bin에서 자동으로 로드된다. (SSD 기반 자체 포함)
 
 ### 5-3. 전체 서버 일괄 중지
 
@@ -199,9 +204,15 @@ curl.exe -X POST -F "pdf=@C:\path\to\file.pdf" "http://127.0.0.1:3001/upload?sta
 ## 8) 에이전트 재진입 체크리스트 (핵심)
 
 다른 환경에서 AI 에이전트가 작업을 바로 이어가려면 아래 순서만 확인하면 된다.
+**C 드라이브에는 아무것도 필요 없고, SSD(D:\local-llm) 하나만으로 완전 독립적이다.**
 
-1. SSD 경로에 모델/데이터 폴더 존재 여부 확인
-2. 5001/5002/5003 프로세스 상태 확인
+1. SSD 경로에 모델/데이터/런타임 폴더 존재 여부 확인
+   - D:\local-llm\bin\llama-server.exe
+   - D:\local-llm\models\extractor\...
+   - D:\local-llm\models\planner\...
+   - D:\local-llm\data\uploads\
+   - D:\local-llm\data\embeddings\
+2. 5001/5002/5003 프로세스 상태 확인 (또는 start-all.ps1 실행)
 3. /health에서 API URL/저장경로 반영 확인
 4. 샘플 PDF로 /upload 스모크 테스트
 5. D:\local-llm\data\embeddings에 새 JSON 생성 확인
@@ -215,6 +226,14 @@ curl.exe -X POST -F "pdf=@C:\path\to\file.pdf" "http://127.0.0.1:3001/upload?sta
 ---
 
 ## 9) 알려진 이슈와 운영 메모
+
+**2026-04-21 업데이트: C 드라이브 의존성 완전 제거**
+
+- llama-server.exe가 이제 D:\local-llm\bin에 포함되어 있다.
+- text-generation-webui 또는 다른 C 드라이브 설치 도구는 더 이상 필요 없다.
+- SSD만으로 완전 독립적인 실행 환경이 구성되었다.
+
+**기타 운영 메모:**
 
 - Windows PowerShell에서 Invoke-RestMethod -Form 파라미터가 버전에 따라 없을 수 있다.
   - 업로드 테스트는 curl.exe -F 사용 권장

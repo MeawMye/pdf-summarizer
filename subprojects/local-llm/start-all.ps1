@@ -25,7 +25,7 @@ if (-not $env:EMBEDDING_PORT) {
 $llamaServerExe = if ($env:LLAMA_SERVER_EXE) {
   $env:LLAMA_SERVER_EXE
 } else {
-  'C:\Users\user\text-generation-webui\venv\Lib\site-packages\llama_cpp_binaries\bin\llama-server.exe'
+  Join-Path $env:LOCAL_MODEL_ROOT '..\bin\llama-server.exe'
 }
 
 if (-not (Test-Path $llamaServerExe)) {
@@ -102,7 +102,7 @@ $processes += Start-ManagedProcess `
 $processes += Start-ManagedProcess `
   -Name 'embedding' `
   -FilePath $pythonCmd `
-  -ArgumentList @('scripts/embedding_api.py') `
+  -ArgumentList @((Join-Path $scriptDir 'embedding_api.py')) `
   -WorkingDirectory $projectRoot `
   -Port 5003
 
