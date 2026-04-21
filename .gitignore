@@ -4,3 +4,6 @@ uploads/
 .env
 venv/
 __pycache__/
+/pdf_test용.pdf
+/총테스트본.pdf
+subprojects/local-llm/.runtime/
