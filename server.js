@@ -19,7 +19,8 @@ const CONFIG = {
   extractorModel: process.env.EXTRACTOR_LLM_MODEL || 'knowledge-extractor',
   plannerModel: process.env.PLANNER_LLM_MODEL || 'sequence-planner',
   embeddingModel: process.env.EMBEDDING_MODEL || 'local-embedding-model',
-  defaultAiTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10)
+  defaultAiTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
+  sourceFaithfulMode: String(process.env.SOURCE_FAITHFUL_MODE || 'true').toLowerCase() === 'true'
 };
 
 let activePort = null;
@@ -76,11 +77,140 @@ async function extractPageRange(dataBuffer, startPage, endPage) {
   for (let pageNum = actualStartPage; pageNum <= actualEndPage; pageNum++) {
     const page = await pdf.getPage(pageNum);
     const content = await page.getTextContent();
-    const pageText = content.items.map((item) => item.str).join(' ');
-    extractedText += `${pageText}\n`;
+    const lines = [];
+    let currentLine = [];
+    let currentY = null;
+
+    for (const item of content.items) {
+      const str = (item.str || '').trim();
+      if (!str) {
+        continue;
+      }
+
+      const y = Array.isArray(item.transform) ? item.transform[5] : null;
+      const isNewLine = currentY !== null && y !== null && Math.abs(y - currentY) > 2;
+
+      if (isNewLine && currentLine.length > 0) {
+        lines.push(currentLine.join(' ').replace(/\s{2,}/g, ' ').trim());
+        currentLine = [];
+      }
+
+      currentLine.push(str);
+      if (y !== null) {
+        currentY = y;
+      }
+    }
+
+    if (currentLine.length > 0) {
+      lines.push(currentLine.join(' ').replace(/\s{2,}/g, ' ').trim());
+    }
+
+    const pageText = lines.join('\n');
+    extractedText += `${pageText}\n\n`;
   }
 
   return { extractedText, totalPages, actualStartPage, actualEndPage };
+}
+
+function isLikelySectionHeading(line) {
+  if (!line || line.length < 4) {
+    return false;
+  }
+
+  if (/^\d+(\.\d+)*\s+/.test(line)) {
+    return true;
+  }
+
+  if (/^[A-Z][A-Za-z0-9\-(),\s]{3,80}$/.test(line) && !line.endsWith('.')) {
+    return true;
+  }
+
+  if (/^(chapter|section|appendix|overview|introduction|exception handling|types of exception)\b/i.test(line)) {
+    return true;
+  }
+
+  return false;
+}
+
+function buildSourceFaithfulSectionOutput(text) {
+  const lines = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  const sections = [];
+  let current = null;
+  const tableBlocks = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (/^Table\s+\d+(\.\d+)*/i.test(line)) {
+      const block = [line];
+      for (let j = i + 1; j < Math.min(i + 8, lines.length); j++) {
+        if (isLikelySectionHeading(lines[j])) {
+          break;
+        }
+        block.push(lines[j]);
+      }
+      tableBlocks.push(block.join('\n'));
+    }
+
+    if (isLikelySectionHeading(line)) {
+      if (current && current.body.length > 0) {
+        sections.push(current);
+      }
+      current = { title: line, body: [] };
+      continue;
+    }
+
+    if (!current) {
+      current = { title: 'Document Overview', body: [] };
+    }
+    current.body.push(line);
+  }
+
+  if (current && current.body.length > 0) {
+    sections.push(current);
+  }
+
+  const summaryLines = ['- Section Outline (source-faithful)'];
+  const extractedLines = ['- Detected Sections'];
+
+  const limitedSections = sections.slice(0, 10);
+  for (const section of limitedSections) {
+    summaryLines.push('');
+    summaryLines.push(`- ${section.title}`);
+    const snippets = section.body.slice(0, 4);
+    for (const snippet of snippets) {
+      summaryLines.push(`  - ${snippet}`);
+    }
+    extractedLines.push(`- ${section.title}`);
+  }
+
+  if (tableBlocks.length > 0) {
+    summaryLines.push('');
+    summaryLines.push('- Table Excerpts (source-faithful)');
+    for (const block of tableBlocks.slice(0, 4)) {
+      summaryLines.push('');
+      summaryLines.push(block);
+    }
+  }
+
+  if (limitedSections.length === 0) {
+    summaryLines.push('');
+    summaryLines.push('- Document Overview');
+    for (const line of lines.slice(0, 12)) {
+      summaryLines.push(`  - ${line}`);
+    }
+  }
+
+  return {
+    summary: summaryLines.join('\n').trim(),
+    extractedKnowledge: extractedLines.join('\n').trim(),
+    summaryMode: 'source-faithful-section-outline'
+  };
 }
 
 function extractProgrammingFocusedText(text) {
@@ -222,7 +352,118 @@ function postProcessSummary(summary) {
     cleaned.push(line);
   }
 
-  return cleaned.join('\n').trim();
+  const sectionHeaderPattern = /^-\s*(Development Setup|Core Workflow|Shared Steps|Target Mapping|Required Settings\/Commands|Validation Checklist|Cautions|Key Concepts|Required Settings\/Commands\/API|Constraints)/;
+  const formatted = [];
+
+  for (const line of cleaned) {
+    const isSectionHeader = sectionHeaderPattern.test(line);
+    if (isSectionHeader && formatted.length > 0) {
+      const prev = formatted[formatted.length - 1];
+      if (prev !== '') {
+        formatted.push('');
+      }
+    }
+
+    formatted.push(line);
+  }
+
+  return formatted.join('\n').trim();
+}
+
+function uniqueTop(items, limit = 10) {
+  const out = [];
+  const seen = new Set();
+  for (const item of items) {
+    const normalized = item.trim();
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    out.push(normalized);
+    if (out.length >= limit) {
+      break;
+    }
+  }
+  return out;
+}
+
+function collectActionableSignals(text) {
+  const functionMatches = text.match(/\b[A-Za-z_][A-Za-z0-9_]*\s*\(\)/g) || [];
+  const acronymMatches = text.match(/\b(?:SVC|HVC|SMC|IRQ|FIQ|MMU|LTDC|API|SDK|CMSIS|HAL)\b/g) || [];
+  const toolMatches = text.match(/\b(?:STM32CubeMX|STM32|ARM Cortex-[ARMv0-9A-Za-z.-]+|Vector Table(?:s)?)\b/g) || [];
+  const targetMatches = text.match(/\b(?:Exception|Handler|Abort|Supervisor|User mode|Privileged mode|Secure|Non-secure|PL1|PL2|Monitor)\b/gi) || [];
+
+  return {
+    tools: uniqueTop(toolMatches, 6),
+    functionsAndApis: uniqueTop([...functionMatches, ...acronymMatches], 10),
+    targets: uniqueTop(targetMatches, 10)
+  };
+}
+
+function buildActionableBrief(text) {
+  const signals = collectActionableSignals(text);
+
+  const toolText = signals.tools.length > 0 ? signals.tools.join(', ') : 'No explicit tools/environment found in source';
+  const fnText = signals.functionsAndApis.length > 0 ? signals.functionsAndApis.join(', ') : 'No explicit functions/APIs found in source';
+  const targetText = signals.targets.length > 0 ? signals.targets.join(', ') : 'No explicit Handler/Exception/Mode found in source';
+
+  return [
+    '- Development Setup',
+    `- Tools/Environment: ${toolText}`,
+    `- Required Functions/APIs: ${fnText}`,
+    `- Applicable Targets (Handler/Exception/Mode): ${targetText}`
+  ].join('\n');
+}
+
+function buildFallbackExecutionPlan(text) {
+  const signals = collectActionableSignals(text);
+  const targets = signals.targets.length > 0 ? signals.targets : ['Exception', 'Handler'];
+  const apis = signals.functionsAndApis.length > 0 ? signals.functionsAndApis : ['SVC', 'IRQ', 'FIQ'];
+
+  const commonTasks = [
+    '- Shared Steps (deduplicated)',
+    '- Save processor state and return address',
+    '- Define mode transition rules on exception entry',
+    '- Define exception return procedure and validation checks'
+  ];
+
+  const targetMappings = ['- Target Mapping'];
+  for (const target of targets.slice(0, 6)) {
+    targetMappings.push(`- ${target}: apply Shared Steps 1-3`);
+  }
+
+  return [
+    '- Core Workflow',
+    '- Define the exception handling flow',
+    '- Define entry conditions for each Handler/Exception/Mode',
+    '- Define each repeated step once and map it to targets',
+    '',
+    ...commonTasks,
+    '',
+    ...targetMappings,
+    '',
+    '- Required Settings/Commands',
+    `- ${apis.slice(0, 8).join(', ')}`,
+    '',
+    '- Cautions',
+    '- Do not add any function/API/command not present in the source',
+    '- Keep technical terms exactly as written in the source'
+  ].join('\n');
+}
+
+function ensureActionableSummary(summary, sourceText) {
+  const normalized = postProcessSummary(summary);
+  const hasActionableHeader = /-\s*Development Setup/.test(normalized);
+  if (hasActionableHeader) {
+    return normalized;
+  }
+
+  const actionableBrief = buildActionableBrief(sourceText);
+  return `${actionableBrief}\n\n${normalized}`.trim();
 }
 
 async function callLocalChat({ apiUrl, modelName, systemPrompt, userPrompt, maxTokens, timeoutMs }) {
@@ -266,24 +507,29 @@ async function callLocalChat({ apiUrl, modelName, systemPrompt, userPrompt, maxT
 async function runLayeredPipeline(text, timeoutMs) {
   const focusedText = extractProgrammingFocusedText(text);
   const clippedText = (focusedText || text).slice(0, 5000);
+  const actionableBrief = buildActionableBrief(clippedText);
 
   const extractedKnowledge = await callLocalChat({
     apiUrl: CONFIG.extractorApiUrl,
     modelName: CONFIG.extractorModel,
     systemPrompt: [
-      '너는 기술 문서에서 구현에 직접 필요한 정보만 추출하는 모델이다.',
-      '영어 기술어(함수명, API명, 모드명, 핸들러명, 명령어)는 절대 번역/의역하지 말고 원문 그대로 유지한다.',
-      '원문에 없는 함수/API/명령어를 새로 만들지 않는다.',
-      '법적 고지, 회사 소개, 마케팅 문구는 제거한다.'
+      'You extract only implementation-critical information from technical documents.',
+      'Output in English only.',
+      'Do not translate, paraphrase, or alter technical terms from the source.',
+      'Keep function names, API names, mode names, handler names, and commands exactly as in source text.',
+      'Do not invent any function/API/command not explicitly present in source.'
     ].join(' '),
     userPrompt: [
-      '아래 문서에서 프로그래머가 구현에 바로 쓰는 정보만 추출해 주세요.',
-      '출력 형식은 반드시 아래 4개 섹션만 사용하세요.',
-      '1) 개발 준비 요약(최우선): 필요한 개발도구/환경/필수 함수/API/특이 설정 3~8개',
-      '2) 핵심 개념: 구현에 필요한 개념 3~6개',
-      '3) 필요한 설정/명령어/API: 원문에 있는 값만 3~10개',
-      '4) 주의사항/제약조건: 실패 방지 포인트 2~5개',
-      '영어 기술어는 반드시 원문 그대로 유지하세요.',
+      'Extract implementation-ready information for programmers from the source text below.',
+      'Output format must use exactly these 4 sections in English:',
+      '1) Development Setup: tools/environment/required functions/APIs/special settings (3-8 bullets)',
+      '2) Key Concepts: 3-6 bullets',
+      '3) Required Settings/Commands/API: 3-10 bullets from source only',
+      '4) Constraints: 2-5 bullets',
+      'All output must be English and source-faithful.',
+      '',
+      '[Detected actionable signals from source]',
+      actionableBrief,
       '',
       clippedText
     ].join('\n'),
@@ -295,24 +541,32 @@ async function runLayeredPipeline(text, timeoutMs) {
     apiUrl: CONFIG.plannerApiUrl,
     modelName: CONFIG.plannerModel,
     systemPrompt: [
-      '너는 추출된 기술 정보를 구현 계획으로 재구성하는 계획 모델이다.',
-      '영어 기술어(함수명, API명, 모드명, 핸들러명)는 원문 그대로 유지한다.',
-      '중복 작업이 여러 대상에 반복되면, 작업은 1회만 기술하고 적용 대상을 매핑해서 보여준다.',
-      '원문 근거 없는 새 함수/API/명령어를 만들지 않는다.'
+      'You are a planning model that converts extracted technical facts into an executable implementation plan.',
+      'Output in English only.',
+      'Keep technical terms exactly as in source text.',
+      'If deduplication is uncertain, prioritize a clear handler-by-handler listing instead of forced dedup.',
+      'Do not invent any function/API/command not present in source.'
     ].join(' '),
     userPrompt: [
-      '아래 추출 결과를 기반으로 실제 작업 순서를 만들어 주세요.',
-      '출력 형식(고정):',
-      '1) 개발 준비 요약',
-      '2) 핵심 작업 순서',
-      '3) 공통 작업(중복 제거): 반복되는 작업만 모아서 한 번만 작성',
-      '4) 적용 대상 매핑: 각 공통 작업이 적용되는 Handler/Exception/Mode 목록',
-      '5) 필수 설정/명령어',
-      '6) 주의사항',
-      '규칙:',
-      '- 동일 작업 문장을 반복하지 말 것',
-      '- 작업은 한 번, 적용 대상은 별도 매핑',
-      '- 영어 기술어 원문 유지',
+      'Create an implementation plan from the extracted results below.',
+      'Output format (English, fixed headings):',
+      '1) Development Setup',
+      '2) Core Workflow',
+      '3) Shared Steps (deduplicated) OR Handler-by-Handler Steps (if dedup is unclear)',
+      '4) Target Mapping',
+      '5) Required Settings/Commands',
+      '6) Validation Checklist',
+      '7) Cautions',
+      'Rules:',
+      '- Keep source meaning unchanged',
+      '- Keep technical terms exactly as in source',
+      '- If repeated tasks are hard to deduplicate safely, list by each handler clearly',
+      '',
+      '[Detected actionable signals from source]',
+      actionableBrief,
+      '',
+      '[Source excerpt]',
+      clippedText,
       '',
       extractedKnowledge
     ].join('\n'),
@@ -321,8 +575,8 @@ async function runLayeredPipeline(text, timeoutMs) {
   });
 
   return {
-    extractedKnowledge: postProcessSummary(extractedKnowledge),
-    executionPlan: postProcessSummary(plannedSequence)
+    extractedKnowledge: ensureActionableSummary(extractedKnowledge, clippedText),
+    executionPlan: ensureActionableSummary(plannedSequence, clippedText)
   };
 }
 
@@ -484,17 +738,29 @@ app.post('/upload', upload.single('pdf'), async (req, res) => {
 
     if (useAI) {
       try {
-        const pipeline = await runLayeredPipeline(processedText, aiTimeoutMs);
-        extractedKnowledge = pipeline.extractedKnowledge;
-        summary = pipeline.executionPlan;
-        summaryMode = 'local-llm-pipeline';
+        if (CONFIG.sourceFaithfulMode) {
+          const sectioned = buildSourceFaithfulSectionOutput(processedText);
+          extractedKnowledge = sectioned.extractedKnowledge;
+          summary = sectioned.summary;
+          summaryMode = sectioned.summaryMode;
+        } else {
+          const pipeline = await runLayeredPipeline(processedText, aiTimeoutMs);
+          extractedKnowledge = pipeline.extractedKnowledge;
+          summary = pipeline.executionPlan;
+          summaryMode = 'local-llm-pipeline';
+        }
       } catch (aiError) {
         console.error('Layered local AI pipeline failed, falling back:', aiError.message);
-        summary = summarizeText(processedText);
-        summaryMode = 'extractive-fallback';
+        const sectioned = buildSourceFaithfulSectionOutput(processedText);
+        extractedKnowledge = sectioned.extractedKnowledge;
+        summary = sectioned.summary;
+        summaryMode = 'source-faithful-fallback';
       }
     } else {
-      summary = summarizeText(processedText);
+      const sectioned = buildSourceFaithfulSectionOutput(processedText);
+      extractedKnowledge = sectioned.extractedKnowledge;
+      summary = sectioned.summary;
+      summaryMode = sectioned.summaryMode;
     }
 
     if (generateEmbeddings) {
