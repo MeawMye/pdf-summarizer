@@ -20,7 +20,7 @@ const CONFIG = {
   plannerModel: process.env.PLANNER_LLM_MODEL || 'sequence-planner',
   embeddingModel: process.env.EMBEDDING_MODEL || 'local-embedding-model',
   defaultAiTimeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '120000', 10),
-  sourceFaithfulMode: String(process.env.SOURCE_FAITHFUL_MODE || 'true').toLowerCase() === 'true'
+  sourceFaithfulMode: String(process.env.SOURCE_FAITHFUL_MODE || 'false').toLowerCase() === 'true'
 };
 
 let activePort = null;

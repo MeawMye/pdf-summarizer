@@ -31,13 +31,14 @@
   - 비교적 가벼워서 빠른 필터링/추출에 유리
 - Planner: Qwen2.5-7B Instruct Q4_K_M
   - 단계화/구조화 응답 품질이 더 안정적
-- Embedding(현재 실행 경로): sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-  - fastembed에서 즉시 구동 가능, 다국어 처리 가능, 초기 세팅 속도가 빠름
+- Embedding(현재 실행 경로): BAAI/bge-m3
+  - 검색 품질 우선 운영 기준에 맞춰 bge-m3를 고정 사용한다.
+  - 임베딩 서버 구현은 embedding_api.py에서 bge-m3 전용 경로를 사용한다.
 
 참고:
 
-- BAAI/bge-m3 파일은 SSD에 다운로드되어 있으나, 현재 fastembed TextEmbedding 경로로는 직접 로딩되지 않는다.
-- bge-m3를 엄밀히 유지하려면 별도 bge-m3 전용 서빙 스택(Transformers/TEI/vLLM 계열)으로 5003만 교체하면 된다.
+- bge-m3는 SSD의 models/embedding/bge-m3 자산을 기준으로 운영한다.
+- fastembed 경로는 fallback 용도로 남아 있으나, 운영 기본값은 bge-m3 고정이다.
 
 ---
 
@@ -116,7 +117,7 @@ $env:AI_TIMEOUT_MS = '180000'
 
 ```powershell
 npm install
-python -m pip install --upgrade pip fastapi uvicorn fastembed
+python -m pip install --upgrade pip fastapi uvicorn fastembed transformers torch
 ```
 
 ### 5-2. 전체 서버 일괄 실행(권장)
@@ -138,8 +139,7 @@ python -m pip install --upgrade pip fastapi uvicorn fastembed
 
 참고:
 
-- EMBEDDING_MODEL이 bge-m3이거나 비어 있으면 start-all은 실행 가능성을 위해
-  sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2로 자동 보정한다.
+- EMBEDDING_MODEL이 비어 있으면 start-all은 bge-m3로 기본값을 설정한다.
 - llama-server.exe는 D:\local-llm\bin에서 자동으로 로드된다. (SSD 기반 자체 포함)
 
 ### 5-3. 전체 서버 일괄 중지
@@ -151,6 +151,32 @@ python -m pip install --upgrade pip fastapi uvicorn fastembed
 ### 5-4. 수동 실행이 필요할 때
 
 수동 방식은 디버깅 용도로만 권장하며, 기본 운영은 start-all/stop-all을 사용한다.
+
+### 5-5. 운영 규칙 (작업 세션 기준)
+
+이 프로젝트는 24시간 상시 서버 운영이 아니라, "작업하는 동안만 상시 실행"을 기본 규칙으로 한다.
+
+1. 작업 시작 시 1회 실행
+
+```powershell
+.\subprojects\local-llm\start-all.ps1
+```
+
+2. 작업 중에는 서버를 계속 유지
+
+- extractor(5001), planner(5002), embedding(5003), node-api(3001)를 그대로 유지한다.
+- 중간 점검은 /health 또는 업로드 스모크 테스트로 확인한다.
+
+3. 작업 종료 시 일괄 종료
+
+```powershell
+.\subprojects\local-llm\stop-all.ps1
+```
+
+4. 예외 규칙
+
+- 임베딩을 전혀 사용하지 않는 디버깅 세션에서는 embedding만 개별 중지해도 된다.
+- 일반 운영에서는 start-all/stop-all 쌍으로 맞춰 실행/종료하는 것을 권장한다.
 
 ---
 
@@ -239,6 +265,9 @@ curl.exe -X POST -F "pdf=@C:\path\to\file.pdf" "http://127.0.0.1:3001/upload?sta
   - 업로드 테스트는 curl.exe -F 사용 권장
 - fastembed 캐시는 기본적으로 시스템 임시 경로를 사용한다.
   - 필요 시 별도 캐시 경로 정책을 정해 SSD로 이동 가능
+- Python 3.13 환경에서는 일부 임베딩 스택(FlagEmbedding/sentence-transformers 직경로)에서
+  pyarrow/sklearn 네이티브 충돌(access violation)이 발생할 수 있다.
+  - 현재 embedding_api.py는 bge-m3를 transformers+torch 경로로 로딩해 이 이슈를 우회한다.
 - Node 서버는 포트 충돌 시 자동으로 다음 포트로 이동한다.
 
 ---

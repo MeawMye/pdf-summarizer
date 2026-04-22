@@ -12,8 +12,8 @@ if (-not (Test-Path $runtimeDir)) {
 
 . (Join-Path $scriptDir 'set-local-llm-env.ps1')
 
-if (-not $env:EMBEDDING_MODEL -or $env:EMBEDDING_MODEL -eq 'bge-m3') {
-  $env:EMBEDDING_MODEL = 'sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
+if (-not $env:EMBEDDING_MODEL) {
+  $env:EMBEDDING_MODEL = 'bge-m3'
 }
 if (-not $env:EMBEDDING_HOST) {
   $env:EMBEDDING_HOST = '127.0.0.1'
